@@ -146,6 +146,7 @@ export async function POST(req: Request) {
     let promptHeader = SYSTEM_PROMPT;
     if (files.length > 0) promptHeader += `\nDokumen yang diunggah:\n${fileNames}\n`;
     if (images.length > 0) promptHeader += `\nBeberapa materi dikirim sebagai gambar (catatan/foto slide). Baca isinya dan jadikan bagian dari materi.\n`;
+    if (isYouTubeSource) promptHeader += `\nMateri di bawah adalah TRANSKRIP ASLI subtitle video YouTube. Gunakan HANYA informasi yang benar-benar terdapat pada transkrip tersebut. Jangan menambahkan pengetahuan umum, contoh, atau rumus yang tidak disebutkan.\n`;
     
     if (contentToAnalyze.trim().length > 0) {
       parts.push({ text: `${promptHeader}\n\nMaterial to analyze:\n${contentToAnalyze}` });

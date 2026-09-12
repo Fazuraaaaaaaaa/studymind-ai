@@ -77,9 +77,88 @@ function formatTimestamp(ms: number): string {
 }
 
 function formatTranscript(segments: TranscriptResponse[], startSeconds: number | null): string {
-  const cleaned = segments.map((s) => ({
-    offset: s.offset ?? 0,
-    text: (s.text || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim(),
+  const cleaned = segments
+    .map((s) => ({
+      offset: s.offset ?? 0,
+      text: (s.text || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim(),
+    }))
+    .filter((s) => s.text.length > 0 && !/^[\[({]*(♪|♫|\u33a1)[\])}\]]*$/i.test(s.text))
+    .filter((s) => (startSeconds === null ? true : s.offset >= startSeconds * 1000));
+
+  if (cleaned.length === 0) return "";
+
+  const lines: string[] = [];
+  let buffer: string[] = [];
+  let bufferStart = cleaned[0].offset;
+
+  for (const seg of cleaned) {
+    if (buffer.length === 0) bufferStart = seg.offset;
+    buffer.push(seg.text);
+    const isSentenceEnd = /[.?!]$/.test(seg.text);
+    const reachedChunk = seg.offset - bufferStart >= 25_000 || buffer.join(" ").length >= 400;
+    if (isSentenceEnd && reachedChunk) {
+      lines.push(`[${formatTimestamp(bufferStart)}] ${buffer.join(" ")}`);
+      buffer = [];
+    }
+  }
+  if (buffer.length > 0) lines.push(`[${formatTimestamp(bufferStart)}] ${buffer.join(" ")}`);
+  return lines.join("\n\n");
+}
+
+async function fetchViaInnerTube(videoId: string): Promise<{ segments: TranscriptResponse[]; language: string } | null> {
+  const resp = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)',
+    },
+    body: JSON.stringify({
+      context: {
+        client: {
+          clientName: 'ANDROID',
+          clientVersion: '20.10.38',
+          androidSdkVersion: 34,
+        },
+      },
+      videoId,
+    }),
+  });
+  
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+  if (!Array.isArray(tracks) || tracks.length === 0) return null;
+
+  // Find the best track
+  let track = tracks.find((t: any) => t.languageCode === 'id') || 
+              tracks.find((t: any) => t.languageCode === 'en') || 
+              tracks[0];
+
+  // Fetch subtitles using track.baseUrl
+  const subUrl = new URL(track.baseUrl);
+  subUrl.searchParams.set('fmt', 'json3');
+  
+  const subResp = await fetch(subUrl.toString(), {
+    headers: {
+      'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)',
+    },
+  });
+  
+  if (!subResp.ok) return null;
+  
+  // json3 parsing
+  const json = await subResp.json();
+  const events = json?.events || [];
+  
+  const segments = events.filter((e: any) => e.segs && e.segs.length > 0).map((e: any) => ({
+    text: e.segs.map((s: any) => s.utf8).join(''),
+    offset: e.tStartMs,
+    duration: e.dDurationMs
+  }));
+
+  return { segments, language: track.languageCode };
+}
+
 async function fetchVideoTitle(videoId: string): Promise<string | null> {
   try {
     const res = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
@@ -98,15 +177,27 @@ export async function fetchYouTubeTranscript(input: string): Promise<YouTubeTran
   let language = "unknown";
   let lastError: unknown = null;
 
-  for (const lang of PREFERRED_LANGS) {
-    try {
-      segments = await YoutubeTranscript.fetchTranscript(videoId, { lang });
-      language = lang;
-      break;
-    } catch (err) {
-      lastError = err;
-      if (err instanceof YoutubeTranscriptNotAvailableLanguageError) continue;
-      break;
+  try {
+    const innerTubeRes = await fetchViaInnerTube(videoId);
+    if (innerTubeRes) {
+      segments = innerTubeRes.segments;
+      language = innerTubeRes.language;
+    }
+  } catch (e) {
+    console.error("InnerTube proxy error:", e);
+  }
+
+  if (!segments) {
+    for (const lang of PREFERRED_LANGS) {
+      try {
+        segments = await YoutubeTranscript.fetchTranscript(videoId, { lang });
+        language = lang;
+        break;
+      } catch (err) {
+        lastError = err;
+        if (err instanceof YoutubeTranscriptNotAvailableLanguageError) continue;
+        break;
+      }
     }
   }
 
@@ -152,26 +243,4 @@ export function buildYouTubeMaterial(result: YouTubeTranscriptResult): string {
     result.text,
     "---"
   ].filter(Boolean).join("\n");
-}
-
-  })).filter((s) => s.text.length > 0 && !/^[\[({]*(♪|♫|\u33a1)[\])}\]]*$/i.test(s.text))
-     .filter((s) => (startSeconds === null ? true : s.offset >= startSeconds * 1000));
-
-  if (cleaned.length === 0) return "";
-  const lines: string[] = [];
-  let buffer: string[] = [];
-  let bufferStart = cleaned[0].offset;
-
-  for (const seg of cleaned) {
-    if (buffer.length === 0) bufferStart = seg.offset;
-    buffer.push(seg.text);
-    const isSentenceEnd = /[.?!]$/.test(seg.text);
-    const reachedChunk = seg.offset - bufferStart >= 25_000 || buffer.join(" ").length >= 400;
-    if (isSentenceEnd && reachedChunk) {
-      lines.push(`[${formatTimestamp(bufferStart)}] ${buffer.join(" ")}`);
-      buffer = [];
-    }
-  }
-  if (buffer.length > 0) lines.push(`[${formatTimestamp(bufferStart)}] ${buffer.join(" ")}`);
-  return lines.join("\n\n");
 }
