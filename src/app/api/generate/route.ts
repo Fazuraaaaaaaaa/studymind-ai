@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { generateWithFallback } from "@/lib/gemini";
 import {
+  fetchYouTubeTranscript,
+  buildYouTubeMaterial,
+  YouTubeError,
+} from "@/lib/youtube";
+import {
   extractDocument,
   combineDocuments,
   MAX_FILES,
@@ -62,6 +67,7 @@ export async function POST(req: Request) {
   try {
     const formData = await req.formData();
     const textInput = formData.get("text") as string | null;
+    const youtubeUrl = formData.get("youtubeUrl") as string | null;
     const files = collectFiles(formData);
 
     if (files.length > MAX_FILES) {
@@ -91,8 +97,32 @@ export async function POST(req: Request) {
     const images = documents.map((doc) => doc.image).filter((img): img is NonNullable<typeof img> => img !== null);
 
     let contentToAnalyze = "";
-    if (extractedText.trim().length > 0) contentToAnalyze = extractedText;
-    else if (textInput && textInput.trim().length > 0) contentToAnalyze = textInput;
+    let isYouTubeSource = false;
+
+    if (youtubeUrl && youtubeUrl.trim().length > 0) {
+      try {
+        const yt = await fetchYouTubeTranscript(youtubeUrl);
+        contentToAnalyze = buildYouTubeMaterial(yt);
+        isYouTubeSource = true;
+        console.info(
+          `[generate] youtube ${yt.videoId} -> subtitle "${yt.language}", ${yt.text.length} karakter, judul: ${yt.title ?? "(n/a)"}`
+        );
+      } catch (err: any) {
+        return NextResponse.json(
+          {
+            error:
+              err instanceof YouTubeError
+                ? `${err.message}${err.hint ? ` ${err.hint}` : ""}`
+                : `Gagal mengambil transkrip video YouTube: ${err?.message || "kesalahan tidak diketahui."}`,
+          },
+          { status: 400 }
+        );
+      }
+    } else if (extractedText.trim().length > 0) {
+      contentToAnalyze = extractedText;
+    } else if (textInput && textInput.trim().length > 0) {
+      contentToAnalyze = textInput;
+    }
 
     if (contentToAnalyze.length > MAX_CONTENT_CHARS) {
       contentToAnalyze = `${contentToAnalyze.slice(0, MAX_CONTENT_CHARS)}\n\n[Catatan: materi dipotong karena terlalu panjang.]`;

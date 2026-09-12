@@ -203,7 +203,7 @@ export function HeroSection({
     try {
       const formData = new FormData()
       if (activeTab === "file") files.forEach((f) => formData.append("files", f))
-      else if (activeTab === "youtube") formData.append("text", `Topik materi dari YouTube: ${youtubeUrl}`)
+      else if (activeTab === "youtube") formData.append("youtubeUrl", youtubeUrl)
       else formData.append("text", text)
 
       const res = await fetch("/api/generate", { method: "POST", body: formData })
