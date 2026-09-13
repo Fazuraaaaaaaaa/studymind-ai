@@ -3,16 +3,14 @@ import { GoogleGenAI } from "@google/genai";
 const apiKey = process.env.GEMINI_API_KEY;
 export const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
-// Mengutamakan model Pro untuk hasil analisa dan output JSON yang jauh lebih cerdas & berkualitas.
+// Mengutamakan model Flash generasi terbaru untuk kecepatan tinggi dan keandalan pemrosesan multimodal & YouTube.
 export const CANDIDATE_MODELS = [
-  "gemini-3.1-pro-preview",
-  "gemini-pro-latest",
   "gemini-3.8-flash",
   "gemini-3.7-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash",
-  "gemini-2.5-flash",
-  "gemini-1.5-pro",
+  "gemini-3.1-pro-preview",
+  "gemini-pro-latest",
 ];
 
 export async function generateWithFallback(options: {

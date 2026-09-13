@@ -3,6 +3,7 @@ import { generateWithFallback } from "@/lib/gemini";
 import {
   fetchYouTubeTranscript,
   buildYouTubeMaterial,
+  extractVideoId,
   YouTubeError,
 } from "@/lib/youtube";
 import {
@@ -46,6 +47,9 @@ Instructions:
 `;
 
 const MAX_CONTENT_CHARS = 120_000;
+
+// YouTube extraction + Gemini generation bisa memakan waktu >10 detik.
+export const maxDuration = 60;
 
 function collectFiles(formData: FormData): File[] {
   const multiple = formData.getAll("files").filter((v): v is File => v instanceof File);
@@ -98,25 +102,36 @@ export async function POST(req: Request) {
 
     let contentToAnalyze = "";
     let isYouTubeSource = false;
+    let ytMode = "none";
+    let youtubeFallbackUrl: string | null = null;
 
     if (youtubeUrl && youtubeUrl.trim().length > 0) {
       try {
         const yt = await fetchYouTubeTranscript(youtubeUrl);
         contentToAnalyze = buildYouTubeMaterial(yt);
         isYouTubeSource = true;
+        ytMode = "subtitle";
         console.info(
           `[generate] youtube ${yt.videoId} -> subtitle "${yt.language}", ${yt.text.length} karakter, judul: ${yt.title ?? "(n/a)"}`
         );
       } catch (err: any) {
-        return NextResponse.json(
-          {
-            error:
-              err instanceof YouTubeError
-                ? `${err.message}${err.hint ? ` ${err.hint}` : ""}`
-                : `Gagal mengambil transkrip video YouTube: ${err?.message || "kesalahan tidak diketahui."}`,
-          },
-          { status: 400 }
-        );
+        const vid = extractVideoId(youtubeUrl);
+        if (!vid) {
+          return NextResponse.json(
+            {
+              error:
+                err instanceof YouTubeError
+                  ? `${err.message}${err.hint ? ` ${err.hint}` : ""}`
+                  : `Gagal mengambil transkrip video YouTube: ${err?.message || "kesalahan tidak diketahui."}`,
+            },
+            { status: 400 }
+          );
+        }
+        // Fallback: biarkan server Google yang "menonton" videonya langsung.
+        console.warn(`[generate] YouTube transcript gagal untuk ${vid}, fallback ke Gemini native video. Reason:`, err?.message);
+        youtubeFallbackUrl = `https://www.youtube.com/watch?v=${vid}`;
+        isYouTubeSource = true;
+        ytMode = "video";
       }
     } else if (extractedText.trim().length > 0) {
       contentToAnalyze = extractedText;
@@ -128,7 +143,7 @@ export async function POST(req: Request) {
       contentToAnalyze = `${contentToAnalyze.slice(0, MAX_CONTENT_CHARS)}\n\n[Catatan: materi dipotong karena terlalu panjang.]`;
     }
 
-    if (contentToAnalyze.trim().length < 30 && images.length === 0) {
+    if (!youtubeFallbackUrl && contentToAnalyze.trim().length < 30 && images.length === 0) {
       const warningText = warnings.length ? ` ${warnings.join(" ")}` : "";
       return NextResponse.json(
         {
@@ -146,13 +161,21 @@ export async function POST(req: Request) {
     let promptHeader = SYSTEM_PROMPT;
     if (files.length > 0) promptHeader += `\nDokumen yang diunggah:\n${fileNames}\n`;
     if (images.length > 0) promptHeader += `\nBeberapa materi dikirim sebagai gambar (catatan/foto slide). Baca isinya dan jadikan bagian dari materi.\n`;
-    if (isYouTubeSource) promptHeader += `\nMateri di bawah adalah TRANSKRIP ASLI subtitle video YouTube. Gunakan HANYA informasi yang benar-benar terdapat pada transkrip tersebut. Jangan menambahkan pengetahuan umum, contoh, atau rumus yang tidak disebutkan.\n`;
     
-    if (contentToAnalyze.trim().length > 0) {
-      parts.push({ text: `${promptHeader}\n\nMaterial to analyze:\n${contentToAnalyze}` });
-      if (images.length > 0) parts.push({ text: "Lanjut, berikut materi berupa gambar:" });
+    if (youtubeFallbackUrl) {
+      promptHeader += `\nMateri ini berasal dari tautan video YouTube berikut. Tonton dan analisa materi video tersebut secara komprehensif, jangan berhalusinasi.\n`;
+      parts.push({ text: promptHeader });
+      parts.push({ fileData: { fileUri: youtubeFallbackUrl, mimeType: "video/mp4" } });
+      if (images.length > 0) parts.push({ text: "Lanjut, berikut materi tambahan berupa gambar:" });
     } else {
-      parts.push({ text: `${promptHeader}\n\nMaterial to analyze (hanya gambar):` });
+      if (isYouTubeSource) promptHeader += `\nMateri di bawah adalah TRANSKRIP ASLI subtitle video YouTube. Gunakan HANYA informasi yang benar-benar terdapat pada transkrip tersebut. Jangan menambahkan pengetahuan umum, contoh, atau rumus yang tidak disebutkan.\n`;
+      
+      if (contentToAnalyze.trim().length > 0) {
+        parts.push({ text: `${promptHeader}\n\nMaterial to analyze:\n${contentToAnalyze}` });
+        if (images.length > 0) parts.push({ text: "Lanjut, berikut materi berupa gambar:" });
+      } else {
+        parts.push({ text: `${promptHeader}\n\nMaterial to analyze (hanya gambar):` });
+      }
     }
 
     for (const image of images) {
@@ -188,9 +211,19 @@ export async function POST(req: Request) {
     });
   } catch (error: any) {
     console.error("Generate API Error:", error);
-    const message = error?.message?.includes("OfficeParser")
-      ? `File gagal dibaca. Pastikan formatnya didukung (${SUPPORTED_EXTENSIONS.join(", ")}).`
-      : error?.message || "Gagal membuat materi belajar. Silakan coba lagi.";
+    
+    let message = error?.message || "Gagal membuat materi belajar. Silakan coba lagi.";
+    
+    if (error?.message?.includes("OfficeParser")) {
+      message = `File gagal dibaca. Pastikan formatnya didukung (${SUPPORTED_EXTENSIONS.join(", ")}).`;
+    } else if (error?.status === 403 || error?.message?.includes("PERMISSION_DENIED") || error?.message?.includes("403")) {
+      message = `Video YouTube ini privat, dibatasi usia, atau tidak mengizinkan akses. Gunakan video YouTube lain yang bersifat publik.`;
+    } else if (error?.status === 404 || error?.message?.includes("NOT_FOUND")) {
+      message = `Video YouTube tidak ditemukan atau dihapus.`;
+    } else if (error?.status === 503 || error?.message?.includes("UNAVAILABLE")) {
+      message = `Server AI sedang sangat sibuk memproses video. Silakan coba lagi dalam beberapa menit.`;
+    }
+
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
